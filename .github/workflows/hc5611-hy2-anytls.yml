@@ -1,0 +1,31 @@
+name: Build HC5611 Hysteria2 and AnyTLS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.8'
+          cache: false
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential bzip2 curl file gawk gettext git jq libncurses-dev perl python3 rsync unzip wget xz-utils zstd qemu-user
+      - name: Compile and verify the compact image
+        run: bash build-hc5611-hy2.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hc5611-hy2-anytls
+          path: firmware-hy2-anytls/
+          if-no-files-found: error
