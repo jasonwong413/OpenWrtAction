@@ -53,7 +53,7 @@ for pattern in ("cmd_api*.go", "cmd_tools*.go", "cmd_geoip*.go", "cmd_geosite*.g
         path.unlink()
 
 registry = Path("include/registry.go")
-removed = {"tun", "tor", "bridge", "ssh", "snell", "naive", "api", "ssmapi", "originca", "vless", "vmess", "trojan", "shadowsocks", "shadowtls"}
+removed = {"tun", "tor", "bridge", "ssh", "snell", "naive", "mdns", "api", "resolved", "ssmapi", "originca", "vless", "vmess", "trojan", "shadowsocks", "shadowtls"}
 imports = removed | {"origin_ca"}
 lines = [
     line for line in registry.read_text().splitlines()
@@ -162,7 +162,7 @@ for name in "${helpers[@]}"; do
 done
 download "$passwall/luci-app-passwall2-26.11.11-r1.apk" passwall2.apk 756d9b6a6a7390ce3b7b357fa1b1bbe3b431317cec0fcd6283202c385c0d6303
 download "$passwall/luci-i18n-passwall2-zh-cn-26.11.11.apk" ib/packages/luci-i18n-passwall2-zh-cn-26.11.11.apk a1999dc0ed31b755f7cffe19bf2900b2b6200c0898f1732491cb9a8f6dd2f65b
-download "$argon/luci-theme-argon-3.1.4-r1.apk"     ib/packages/luci-theme-argon-3.1.4-r1.apk 7c9cfc8ab119d33856294f0959f2c267fd20471d5a2326218f3b316a6bd82ca1
+download "$argon/luci-theme-argon-3.1.4-r1.apk" argon.apk 7c9cfc8ab119d33856294f0959f2c267fd20471d5a2326218f3b316a6bd82ca1
 download "$argon/luci-i18n-argon-config-zh-cn-3.1.4-r1.apk"     ib/packages/luci-i18n-argon-config-zh-cn-3.1.4-r1.apk 84cfcc87e2ce7d5b157d64fa496139a3386fba6b6ee0eca88ff2f0e9283e7657
 download "$feed/usbutils-019-r1.apk" usbutils.apk     a2549ec2636d056a3862a7b1c2e7e057040538a5effd06d700c9b95f77266f8d
 download "$feed/libimobiledevice-utils-2025.07.29~c269d7e3-r2.apk" idevice.apk     67597ee9eb4706c4674bdda0abbb08f7d20a0452959d55810dce9dfd0229335f
@@ -180,6 +180,12 @@ pack() {
         --info "license:$license" --info "depends:$dependencies" \
         --files "$directory" --output "ib/packages/$name-$version.apk"
 }
+mkdir payload/argon
+"$apk" extract --allow-untrusted --destination payload/argon argon.apk
+find payload/argon/www/luci-static/argon -name bg1.webp -delete
+"$apk" mkpkg --info 'name:luci-theme-argon' --info 'version:3.1.4-r2' --info 'arch:all' \
+    --info 'license:Apache-2.0' --info 'depends:luci-base' --files payload/argon \
+    --output ib/packages/luci-theme-argon-3.1.4-r2.apk
 mkdir payload/passwall2
 "$apk" extract --allow-untrusted --destination payload/passwall2 passwall2.apk
 python3 - <<'PASSWALL_DEFAULTS'
@@ -267,7 +273,7 @@ chmod 755 files/etc/hotplug.d/net/20-hc5611-iphone
 sed -i 's/^CONFIG_TARGET_SQUASHFS_BLOCK_SIZE=.*/CONFIG_TARGET_SQUASHFS_BLOCK_SIZE=1024/' ib/.config
 # Add the HC5611 management interface to the ImageBuilder file overlay.
 base64 -d <<'UI_FILES' | tar -xz -C files
-H4sIAKu9AmsC/+y9+Zccx3EgrF85f0ViSE51C9XVxxwAetAYgQBIwgJIGAOKtkejYU139UwJ3V2t
+H4sIAAnjAmsC/+y9+Zccx3EgrF85f0ViSE51C9XVxxwAetAYgQBIwgJIGAOKtkejYU139UwJ3V2t
 quo5ONPvUd615UuS/daWLC+9snd9aO2lpLW9K60O673vT/FHAORP+y98cWRmZR19DEBS+szhkzBd
 eURGRmZGREZGRjpVp/q5e+7Rq57b8cLPfCz/1fi/SX9rteXl5Dem12uNev0z4ugzn8B/oyh2Q2j+
 M5/O/xqXRD/2+16rfunK6vLy2urly86Vlfrl1csLnzn/79//f17crvoDP3Y61f326lq9XnnoecOK
@@ -923,7 +929,7 @@ test "${#manifests[@]}" -eq 1
 image=${images[0]}
 manifest=${manifests[0]}
 bytes=$(stat -c %s "$image")
-test "$bytes" -le "$(((15808 - 512) * 1024))"
+test "$bytes" -le "$(((15808 - 440) * 1024))"
 for name in luci-app-passwall2 sing-box dnsmasq-full kmod-nft-tproxy kmod-mt7603 \
     wpad-basic-mbedtls relayd luci-proto-relay kmod-usb-net-ipheth usbmuxd \
     libimobiledevice-utils kmod-usb-net-rtl8152 kmod-usb-net-asix kmod-usb-net-asix-ax88179 \
