@@ -122,6 +122,50 @@ pack usbutils 019-r2 GPL-2.0-only libc payload/usb
 pack libimobiledevice-utils 2025.07.29~c269d7e3-r3 GPL-2.0-or-later libimobiledevice payload/ios
 
 install -m 755 "$output/99-hc5611-luci" files/etc/uci-defaults/99-hc5611-luci
+mkdir -p files/etc/hotplug.d/net
+cat > files/etc/uci-defaults/95-hc5611-iphone <<'SH'
+#!/bin/sh
+set -e
+
+. /lib/functions.sh
+if ! uci -q get network.iphone >/dev/null; then
+    uci set network.iphone=interface
+    uci set network.iphone.proto=dhcp
+    uci set network.iphone.device=iphoneusb
+    uci set network.iphone.metric=20
+    uci commit network
+fi
+
+attach_iphone() {
+    local section="$1" name networks
+    config_get name "$section" name
+    [ "$name" = wan ] || return 0
+    config_get networks "$section" network
+    case " $networks " in
+        *" iphone "*) ;;
+        *) uci add_list "firewall.$section.network=iphone";;
+    esac
+}
+config_load firewall
+config_foreach attach_iphone zone
+uci commit firewall
+SH
+chmod 755 files/etc/uci-defaults/95-hc5611-iphone
+cat > files/etc/hotplug.d/net/20-hc5611-iphone <<'SH'
+#!/bin/sh
+
+[ "$ACTION" = add ] || return 0
+[ -n "$INTERFACE" ] && [ "$INTERFACE" != iphoneusb ] || return 0
+driver=$(readlink "/sys/class/net/$INTERFACE/device/driver") || return 0
+[ "${driver##*/}" = ipheth ] || return 0
+
+if ip link set dev "$INTERFACE" name iphoneusb; then
+    logger -t iphone-usb "Registered iPhone USB Ethernet as iphoneusb"
+else
+    logger -t iphone-usb "Could not rename $INTERFACE to iphoneusb"
+fi
+SH
+chmod 755 files/etc/hotplug.d/net/20-hc5611-iphone
 sed -i 's/^CONFIG_TARGET_SQUASHFS_BLOCK_SIZE=.*/CONFIG_TARGET_SQUASHFS_BLOCK_SIZE=1024/' ib/.config
 packages=(
     -dnsmasq -ppp -ppp-mod-pppoe -luci -luci-theme-bootstrap -luci-app-package-manager
