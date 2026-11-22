@@ -44,7 +44,33 @@ download https://codeload.github.com/SagerNet/sing-box/tar.gz/v1.14.4 sing-box.t
 tar -xzf sing-box.tar.gz --strip-components=1 -C sing-box
 (
     cd sing-box
-    # Keep the upstream protocol registry and CLI. Build only the needed optional tags.
+    python3 - <<'PY'
+from pathlib import Path
+
+commands = Path("cmd/sing-box")
+for pattern in ("cmd_api*.go", "cmd_tools*.go", "cmd_geoip*.go", "cmd_geosite*.go", "cmd_schema.go"):
+    for path in commands.glob(pattern):
+        path.unlink()
+
+registry = Path("include/registry.go")
+removed = {"tun", "tor", "bridge", "ssh", "snell", "naive", "api", "ssmapi", "originca", "vless", "vmess", "trojan", "shadowsocks", "shadowtls"}
+imports = removed | {"origin_ca"}
+lines = [
+    line for line in registry.read_text().splitlines()
+    if not any(line.endswith("/" + name + '"') for name in imports)
+    and not any(line.strip().startswith(name + ".Register") for name in removed)
+]
+registry.write_text("\n".join(lines) + "\n")
+
+quic = Path("include/quic.go")
+quic.write_text("\n".join(
+    line for line in quic.read_text().splitlines()
+    if not any(part in line for part in (
+        '/protocol/hysteria"', '/protocol/tuic"', '/protocol/naive/quic"',
+        '/transport/v2rayquic"', 'hysteria.Register', 'tuic.Register',
+    ))
+) + "\n")
+PY
     CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build         -tags with_quic,with_utls -gcflags=all=-l -trimpath         -ldflags '-s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=1.14.4'         -o "$workspace/sing-box-core" ./cmd/sing-box
 )
 cat > protocol-check.json <<'JSON'
@@ -62,6 +88,69 @@ cat > protocol-check.json <<'JSON'
 }
 JSON
 if command -v qemu-mipsel >/dev/null; then
+    cat > test-protocols.py <<'PROTOCOL_TEST'
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+import json
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+invocation = sys.argv[1:]
+class Endpoint(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(204)
+        self.end_headers()
+
+with tempfile.TemporaryDirectory() as temp:
+    directory = Path(temp)
+    cert = directory / "cert.pem"
+    key = directory / "key.pem"
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                    "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost", "-keyout", str(key), "-out", str(cert)],
+                   check=True, capture_output=True)
+    endpoint = ThreadingHTTPServer(("127.0.0.1", 0), Endpoint)
+    threading.Thread(target=endpoint.serve_forever, daemon=True).start()
+    for protocol, obfs in (("anytls", {}), ("hysteria2", {}), ("hysteria2", {"type":"salamander","password":"local-obfs"}),
+                           ("hysteria2", {"type":"gecko","password":"local-obfs","min_packet_size":512,"max_packet_size":1200})):
+        options = {"obfs":obfs} if obfs else {}
+        server_config = {"inbounds": [{"type":protocol,"listen":"127.0.0.1","listen_port":28443,
+                           "users":[{"password":"local-test"}],"tls":{"enabled":True,"certificate_path":str(cert),
+                           "key_path":str(key)},**options}], "outbounds":[{"type":"direct","tag":"direct"}]}
+        client_config = {"inbounds":[{"type":"socks","listen":"127.0.0.1","listen_port":28777}],
+                         "outbounds":[{"type":protocol,"server":"127.0.0.1","server_port":28443,
+                         "password":"local-test","tls":{"enabled":True,"server_name":"localhost",
+                         "certificate_path":str(cert)},**options}]}
+        processes = []
+        logfile = directory / "log"
+        try:
+            with logfile.open("wb") as target:
+                for name, config in (("server",server_config), ("client",client_config)):
+                    path = directory / f"{name}.json"
+                    path.write_text(json.dumps(config))
+                    processes.append(subprocess.Popen(invocation + ["run","-c",str(path)], stdout=target, stderr=target))
+                url = f"http://127.0.0.1:{endpoint.server_port}"
+                for attempt in range(12):
+                    result = subprocess.run(["curl","-sS","--max-time","2","--noproxy","","--proxy",
+                                             "socks5h://127.0.0.1:28777","-o","/dev/null","-w","%{http_code}",url],
+                                            capture_output=True)
+                    if result.stdout == b"204":
+                        print(protocol, obfs.get("type","standard"), "HTTP 204", flush=True)
+                        break
+                    if any(p.poll() is not None for p in processes):
+                        break
+                    time.sleep(0.25)
+                assert result.stdout == b"204", logfile.read_text()
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.terminate()
+                process.wait(timeout=5)
+    endpoint.shutdown()
+PROTOCOL_TEST
+    python3 test-protocols.py qemu-mipsel -cpu 24Kc ./sing-box-core
     qemu-mipsel -cpu 24Kc ./sing-box-core version
     qemu-mipsel -cpu 24Kc ./sing-box-core check -c protocol-check.json
 fi
@@ -108,6 +197,22 @@ data = controller.read_text()
 for page in ("app_update", "rule"):
     data = "".join(line for line in data.splitlines(keepends=True) if f'appname, "{page}"}}, cbi' not in line)
 controller.write_text(data)
+node_form = root / "usr/lib/lua/luci/model/cbi/passwall2/client/type/1_sing-box.lua"
+data = node_form.read_text()
+start = data.index('o:value("socks", "Socks")')
+end = data.index('local protocol_val', start)
+node_form.write_text(data[:start] + (
+    'if singbox_tags:find("with_quic") then\n'
+    '    o:value("hysteria2", "Hysteria2")\n'
+    'end\n'
+    'o:value("anytls", "AnyTLS")\n\n'
+) + data[end:])
+subscription = root / "usr/share/passwall2/subscribe.lua"
+data = subscription.read_text()
+signature = "local function processData(szType, content, add_mode, group, sub_cfg)\n"
+assert data.count(signature) == 1
+subscription.write_text(data.replace(signature, signature +
+    '    if szType ~= "hysteria2" and szType ~= "hy2" and szType ~= "anytls" then return nil end\n', 1))
 PASSWALL_DEFAULTS
 pack luci-app-passwall2 26.11.11-r2 GPL-3.0-or-later 'coreutils coreutils-base64 coreutils-nohup coreutils-timeout curl ip-full libuci-lua lua luci-compat luci-lib-jsonc lyaml resolveip tcping unzip dnsmasq-full chinadns-ng sing-box kmod-nft-tproxy kmod-nft-socket' payload/passwall2
 pack sing-box 1.14.4-r1 GPL-3.0-or-later 'ca-bundle kmod-inet-diag kmod-netlink-diag' payload/core
@@ -162,7 +267,7 @@ chmod 755 files/etc/hotplug.d/net/20-hc5611-iphone
 sed -i 's/^CONFIG_TARGET_SQUASHFS_BLOCK_SIZE=.*/CONFIG_TARGET_SQUASHFS_BLOCK_SIZE=1024/' ib/.config
 # Add the HC5611 management interface to the ImageBuilder file overlay.
 base64 -d <<'UI_FILES' | tar -xz -C files
-H4sIAKW2AmsC/+y9+Zccx3EgrF85f0ViSE51C9XVxxwAetAYgQBIwgJIGAOKtkejYU139UwJ3V2t
+H4sIAKu9AmsC/+y9+Zccx3EgrF85f0ViSE51C9XVxxwAetAYgQBIwgJIGAOKtkejYU139UwJ3V2t
 quo5ONPvUd615UuS/daWLC+9snd9aO2lpLW9K60O673vT/FHAORP+y98cWRmZR19DEBS+szhkzBd
 eURGRmZGREZGRjpVp/q5e+7Rq57b8cLPfCz/1fi/SX9rteXl5Dem12uNev0z4ugzn8B/oyh2Q2j+
 M5/O/xqXRD/2+16rfunK6vLy2urly86Vlfrl1csLnzn/79//f17crvoDP3Y61f326lq9XnnoecOK
